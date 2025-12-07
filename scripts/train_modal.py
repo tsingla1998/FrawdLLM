@@ -21,6 +21,7 @@ app = modal.App("frawdllm")
 # Define the container image with all dependencies
 image = (
     modal.Image.debian_slim(python_version="3.11")
+    .apt_install("git")  # Need git to clone repo
     .pip_install(
         "torch",
         "transformers",
