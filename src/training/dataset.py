@@ -199,6 +199,7 @@ def create_dataloaders(
     batch_size: int = 32,
     num_workers: int = 0,
     use_cache: bool = True,
+    tokenizer_path: Path | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """
     Create train and validation dataloaders.
@@ -210,12 +211,13 @@ def create_dataloaders(
         batch_size: Number of sequences per batch
         num_workers: Parallel data loading workers
         use_cache: Whether to cache tokenized data
+        tokenizer_path: Path to tokenizer.json (uses default if None)
 
     Returns:
         train_loader, val_loader
     """
-    train_dataset = TextDataset(train_file, context_length, use_cache=use_cache)
-    val_dataset = TextDataset(val_file, context_length, use_cache=use_cache)
+    train_dataset = TextDataset(train_file, context_length, tokenizer_path=tokenizer_path, use_cache=use_cache)
+    val_dataset = TextDataset(val_file, context_length, tokenizer_path=tokenizer_path, use_cache=use_cache)
 
     train_loader = DataLoader(
         train_dataset,

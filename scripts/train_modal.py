@@ -120,6 +120,7 @@ def train(
         val_file=data_dir / "validation.txt",
         context_length=model_config.context_length,
         batch_size=batch_size,
+        tokenizer_path=tokenizer_dir / "tokenizer.json",
     )
 
     # Create model
