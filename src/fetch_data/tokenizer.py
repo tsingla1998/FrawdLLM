@@ -102,6 +102,9 @@ def train_bpe_tokenizer(
     if output_dir is None:
         output_dir = get_tokenizer_dir()
 
+    # Ensure output directory exists
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     print(f"Training BPE tokenizer with vocab_size={vocab_size}")
     print(f"Training on: {[str(f) for f in train_files]}")
 
