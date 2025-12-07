@@ -41,14 +41,14 @@ REPO_URL = "https://github.com/tsingla1998/FrawdLLM.git"
 
 @app.function(
     image=image,
-    gpu="A10G",  # Options: "T4", "A10G", "A100", "H100"
+    gpu="A100",  # A100 has 40GB vs A10G's 24GB
     timeout=4 * 3600,  # 4 hours max
     volumes={DATA_DIR: volume},
 )
 def train(
     config: str = "small",
     epochs: int = 2,
-    batch_size: int = 64,  # 128+ OOMs due to large vocab output tensor
+    batch_size: int = 256,  # A100 can handle larger batches
     learning_rate: float = 3e-4,
 ):
     """
@@ -219,7 +219,7 @@ def generate(prompt: str = "Once upon a time", max_tokens: int = 100):
 def main(
     config: str = "small",
     epochs: int = 2,
-    batch_size: int = 64,  # 128+ OOMs due to large vocab output tensor
+    batch_size: int = 256,  # A100 can handle larger batches
 ):
     """Local entrypoint - runs on Modal cloud."""
     result = train.remote(config=config, epochs=epochs, batch_size=batch_size)
