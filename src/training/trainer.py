@@ -7,12 +7,15 @@ This handles:
 3. Backward pass (compute gradients)
 4. Update weights (optimizer step)
 5. Logging and checkpointing
+
+Supports mixed precision (fp16) for ~2x speedup on GPUs.
 """
 
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from pathlib import Path
 from tqdm import tqdm
@@ -50,6 +53,7 @@ class Trainer:
         checkpoint_dir: Path | None = None,
         use_wandb: bool = False,
         wandb_project: str = "frawdllm",
+        use_amp: bool | None = None,
     ):
         """
         Args:
@@ -64,6 +68,7 @@ class Trainer:
             checkpoint_dir: Where to save checkpoints
             use_wandb: Whether to log to Weights & Biases
             wandb_project: W&B project name
+            use_amp: Use automatic mixed precision (default: auto-detect CUDA)
         """
         self.model = model
         self.train_loader = train_loader
@@ -84,6 +89,15 @@ class Trainer:
             print("Using CPU (training will be slow)")
 
         self.model.to(self.device)
+
+        # Mixed precision training (fp16) - ~2x speedup on CUDA
+        # Auto-enable on CUDA if not specified
+        if use_amp is None:
+            use_amp = self.device.type == "cuda"
+        self.use_amp = use_amp
+        self.scaler = GradScaler(enabled=use_amp)
+        if use_amp:
+            print("Using mixed precision (fp16)")
 
         # Optimizer: AdamW with weight decay
         # We separate parameters that should/shouldn't have weight decay
@@ -152,18 +166,21 @@ class Trainer:
             input_ids = input_ids.to(self.device)
             targets = targets.to(self.device)
 
-            # Forward pass
-            logits, loss = self.model(input_ids, targets)
+            # Forward pass with mixed precision
+            with autocast(enabled=self.use_amp):
+                logits, loss = self.model(input_ids, targets)
 
             # Backward pass
             self.optimizer.zero_grad()  # Clear old gradients
-            loss.backward()             # Compute new gradients
+            self.scaler.scale(loss).backward()  # Scaled backward for fp16
 
             # Gradient clipping (prevents exploding gradients)
+            self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
             # Update weights
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             self.scheduler.step()
 
             # Track loss
@@ -204,7 +221,8 @@ class Trainer:
             input_ids = input_ids.to(self.device)
             targets = targets.to(self.device)
 
-            logits, loss = self.model(input_ids, targets)
+            with autocast(enabled=self.use_amp):
+                logits, loss = self.model(input_ids, targets)
 
             total_loss += loss.item()
             num_batches += 1
