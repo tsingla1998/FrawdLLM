@@ -63,6 +63,7 @@ def train(
     import subprocess
     import os
     import sys
+    from pathlib import Path
 
     # Clone the repo
     repo_dir = f"{DATA_DIR}/FrawdLLM"
@@ -78,21 +79,20 @@ def train(
     sys.path.insert(0, repo_dir)
 
     # Download data if not present
-    data_dir = f"{DATA_DIR}/tinystories"
-    if not os.path.exists(f"{data_dir}/train.txt"):
+    data_dir = Path(f"{DATA_DIR}/tinystories")
+    if not data_dir.exists() or not (data_dir / "train.txt").exists():
         print("Downloading TinyStories dataset...")
         from src.fetch_data.download import download_tinystories
         download_tinystories(output_dir=data_dir)
 
     # Train tokenizer if not present
-    tokenizer_dir = f"{DATA_DIR}/tokenizer"
-    if not os.path.exists(f"{tokenizer_dir}/tokenizer.json"):
+    tokenizer_dir = Path(f"{DATA_DIR}/tokenizer")
+    if not tokenizer_dir.exists() or not (tokenizer_dir / "tokenizer.json").exists():
         print("Training tokenizer...")
         from src.fetch_data.tokenizer import train_bpe_tokenizer
-        from pathlib import Path
         train_bpe_tokenizer(
-            train_files=[Path(f"{data_dir}/all_data.txt")],
-            output_dir=Path(tokenizer_dir),
+            train_files=[data_dir / "all_data.txt"],
+            output_dir=tokenizer_dir,
         )
 
     # Now run training
@@ -101,7 +101,6 @@ def train(
     print(f"{'='*50}\n")
 
     import torch
-    from pathlib import Path
 
     # Patch paths to use our volume
     os.environ["FRAWDLLM_DATA_DIR"] = DATA_DIR
@@ -117,8 +116,8 @@ def train(
 
     # Create dataloaders
     train_loader, val_loader = create_dataloaders(
-        train_file=Path(f"{data_dir}/train.txt"),
-        val_file=Path(f"{data_dir}/validation.txt"),
+        train_file=data_dir / "train.txt",
+        val_file=data_dir / "validation.txt",
         context_length=model_config.context_length,
         batch_size=batch_size,
     )
@@ -142,7 +141,7 @@ def train(
         config=model_config,
         learning_rate=learning_rate,
         max_epochs=epochs,
-        checkpoint_dir=Path(f"{DATA_DIR}/checkpoints"),
+        checkpoint_dir=Path(DATA_DIR) / "checkpoints",
     )
 
     # Train
@@ -157,7 +156,7 @@ def train(
     print("=" * 50)
 
     from src.fetch_data.tokenizer import load_tokenizer
-    tokenizer = load_tokenizer(Path(f"{tokenizer_dir}/tokenizer.json"))
+    tokenizer = load_tokenizer(tokenizer_dir / "tokenizer.json")
 
     model.eval()
     prompt = torch.tensor([[model_config.bos_token_id]], device=trainer.device)
