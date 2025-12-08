@@ -183,9 +183,9 @@ def prepare_data():
 )
 def train(
     epochs: int = 1,
-    batch_size: int = 32,  # Smaller batches for 100M model
+    batch_size: int = 8,  # Small batches to fit 1024 context in memory
     learning_rate: float = 3e-4,
-    gradient_accumulation: int = 4,  # Effective batch = 32 * 4 = 128
+    gradient_accumulation: int = 16,  # Effective batch = 8 * 16 = 128
 ):
     """Train 100M model on OpenWebText."""
     import subprocess
