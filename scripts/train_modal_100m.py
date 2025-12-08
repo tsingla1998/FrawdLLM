@@ -19,7 +19,7 @@ image = (
     .pip_install(
         "torch",
         "transformers",
-        "datasets",
+        "datasets==2.21.0",  # Pinned - v3.0+ dropped script-based datasets
         "tokenizers",
         "tqdm",
         "wandb",
