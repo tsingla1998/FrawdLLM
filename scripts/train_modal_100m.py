@@ -104,17 +104,33 @@ def prepare_openwebtext_data(output_dir, sample_fraction=0.25, vocab_size=32000)
     tokenizer.save(str(output_dir / "tokenizer.json"))
     print(f"Vocabulary size: {tokenizer.get_vocab_size()}")
 
-    # Tokenize helper
+    # Tokenize helper - uses batch encoding (parallelized in Rust)
     def tokenize_split(data, path, desc):
         bos_id = tokenizer.token_to_id("<|bos|>")
         eos_id = tokenizer.token_to_id("<|eos|>")
         all_tokens = []
-        for example in tqdm(data, desc=desc):
+
+        # Process in batches for parallel tokenization
+        batch_size = 10000
+        texts = []
+        for i, example in enumerate(tqdm(data, desc=f"{desc} (collecting)")):
             text = example["text"]
-            if not text.strip():
-                continue
-            encoded = tokenizer.encode(text)
-            all_tokens.extend([bos_id] + encoded.ids + [eos_id])
+            if text.strip():
+                texts.append(text)
+
+            # Encode batch
+            if len(texts) >= batch_size:
+                encoded_batch = tokenizer.encode_batch(texts)
+                for enc in encoded_batch:
+                    all_tokens.extend([bos_id] + enc.ids + [eos_id])
+                texts = []
+
+        # Final batch
+        if texts:
+            encoded_batch = tokenizer.encode_batch(texts)
+            for enc in encoded_batch:
+                all_tokens.extend([bos_id] + enc.ids + [eos_id])
+
         print(f"  {desc} tokens: {len(all_tokens):,}")
         np.array(all_tokens, dtype=np.uint16).tofile(path)
         return len(all_tokens)
