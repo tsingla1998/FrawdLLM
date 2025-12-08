@@ -2,9 +2,11 @@
 Train FrawdLLM 100M on Modal with OpenWebText.
 
 Usage:
-    modal run scripts/train_modal_100m.py
+    # Step 1: Prepare data (CPU-only, ~$2)
+    modal run scripts/train_modal_100m.py::prepare_data
 
-Data is prepared automatically on first run (downloads OpenWebText, trains tokenizer).
+    # Step 2: Train (A100 GPU)
+    modal run scripts/train_modal_100m.py
 """
 
 import modal
@@ -139,6 +141,26 @@ def prepare_openwebtext_data(output_dir, sample_fraction=0.25, vocab_size=32000)
 
 @app.function(
     image=image,
+    timeout=4 * 3600,  # 4 hours for data prep
+    volumes={DATA_DIR: volume},
+    cpu=8,  # More CPU cores for tokenization
+)
+def prepare_data():
+    """Prepare OpenWebText data (CPU-only, no GPU cost)."""
+    from pathlib import Path
+
+    data_dir = Path(f"{DATA_DIR}/openwebtext")
+    if (data_dir / "train.bin").exists():
+        print("Data already prepared!")
+        return {"status": "already_exists"}
+
+    prepare_openwebtext_data(data_dir)
+    volume.commit()
+    return {"status": "prepared"}
+
+
+@app.function(
+    image=image,
     gpu="A100",
     timeout=8 * 3600,  # 8 hours max for larger model
     volumes={DATA_DIR: volume},
@@ -169,13 +191,10 @@ def train(
     os.chdir(repo_dir)
     sys.path.insert(0, repo_dir)
 
-    # Check for OpenWebText data - prepare if not found
+    # Check for OpenWebText data
     data_dir = Path(f"{DATA_DIR}/openwebtext")
     if not (data_dir / "train.bin").exists():
-        print("OpenWebText data not found, preparing...")
-        prepare_openwebtext_data(data_dir)
-        volume.commit()
-        print("Data preparation complete!")
+        raise RuntimeError("Data not prepared! Run: modal run scripts/train_modal_100m.py::prepare_data")
 
     print(f"\n{'='*60}")
     print("Training FrawdLLM 100M on OpenWebText")
