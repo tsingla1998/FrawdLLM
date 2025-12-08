@@ -55,6 +55,7 @@ class Trainer:
         wandb_project: str = "frawdllm",
         use_amp: bool | None = None,
         gradient_accumulation_steps: int = 1,
+        checkpoint_every_n_steps: int = 5000,
     ):
         """
         Args:
@@ -71,6 +72,7 @@ class Trainer:
             wandb_project: W&B project name
             use_amp: Use automatic mixed precision (default: auto-detect CUDA)
             gradient_accumulation_steps: Accumulate gradients over N steps
+            checkpoint_every_n_steps: Save checkpoint every N optimizer steps
         """
         self.model = model
         self.train_loader = train_loader
@@ -79,6 +81,8 @@ class Trainer:
         self.max_epochs = max_epochs
         self.grad_clip = grad_clip
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.checkpoint_every_n_steps = checkpoint_every_n_steps
+        self.global_step = 0  # Track optimizer steps across epochs
 
         # Setup device (MPS for Mac, CUDA for Nvidia, else CPU)
         if torch.backends.mps.is_available():
@@ -196,8 +200,15 @@ class Trainer:
                 # Clear gradients for next accumulation
                 self.optimizer.zero_grad()
 
+                # Track global optimizer steps
+                self.global_step += 1
+
             # Update progress bar
             avg_loss = total_loss / num_batches
+
+            # Periodic checkpointing (after avg_loss is calculated)
+            if self.global_step % self.checkpoint_every_n_steps == 0 and (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                self.save_step_checkpoint(self.global_step, avg_loss)
             current_lr = self.scheduler.get_last_lr()[0]
             pbar.set_postfix({
                 'loss': f'{avg_loss:.4f}',
@@ -242,6 +253,7 @@ class Trainer:
         """Save a model checkpoint."""
         checkpoint = {
             'epoch': epoch,
+            'global_step': self.global_step,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
@@ -258,6 +270,26 @@ class Trainer:
             path = self.checkpoint_dir / 'best.pt'
             torch.save(checkpoint, path)
             print(f"  Saved best model (val_loss={val_loss:.4f})")
+
+    def save_step_checkpoint(self, step: int, train_loss: float):
+        """Save a checkpoint at a specific training step."""
+        checkpoint = {
+            'global_step': step,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'train_loss': train_loss,
+            'config': self.config,
+        }
+
+        # Save step checkpoint
+        path = self.checkpoint_dir / f'step_{step}.pt'
+        torch.save(checkpoint, path)
+        print(f"\n  Checkpoint saved at step {step} (loss={train_loss:.4f})")
+
+        # Also update latest
+        latest_path = self.checkpoint_dir / 'latest.pt'
+        torch.save(checkpoint, latest_path)
 
     def load_checkpoint(self, path: Path):
         """Load a model checkpoint."""
