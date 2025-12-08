@@ -55,7 +55,7 @@ class Trainer:
         wandb_project: str = "frawdllm",
         use_amp: bool | None = None,
         gradient_accumulation_steps: int = 1,
-        checkpoint_every_n_steps: int = 5000,
+        checkpoint_every_n_steps: int = 1000,
     ):
         """
         Args:
