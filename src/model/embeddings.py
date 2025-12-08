@@ -29,15 +29,19 @@ class Embeddings(nn.Module):
         super().__init__()  # Initialize nn.Module tracking
 
         self.config = config
+        self.use_rope = config.use_rope
 
         # Token embedding table: one vector per vocabulary word
         # Shape: [vocab_size, n_embd] = [8192, 768]
         self.token_emb = nn.Embedding(config.vocab_size, config.n_embd)
 
-        # Position embedding table: one vector per position
+        # Position embedding table: one vector per position (only if NOT using RoPE)
         # Shape: [context_length, n_embd] = [512, 768]
-        # This LIMITS our context window!
-        self.pos_emb = nn.Embedding(config.context_length, config.n_embd)
+        # With RoPE, position is encoded in attention via rotation instead
+        if not self.use_rope:
+            self.pos_emb = nn.Embedding(config.context_length, config.n_embd)
+        else:
+            self.pos_emb = None
 
         # Dropout for regularization (usually 0 for small datasets)
         self.dropout = nn.Dropout(config.dropout)
@@ -54,30 +58,25 @@ class Embeddings(nn.Module):
         """
         batch_size, seq_len = token_ids.shape
 
-        # Safety check: don't exceed context window
-        if seq_len > self.config.context_length:
+        # Safety check: don't exceed context window (relaxed for RoPE)
+        max_len = self.config.context_length * 4 if self.use_rope else self.config.context_length
+        if seq_len > max_len:
             raise ValueError(
-                f"Sequence length {seq_len} exceeds context window "
-                f"{self.config.context_length}"
+                f"Sequence length {seq_len} exceeds maximum length {max_len}"
             )
 
         # Step 1: Look up token embeddings
         # [batch_size, seq_len] -> [batch_size, seq_len, n_embd]
-        tok_emb = self.token_emb(token_ids)
+        embeddings = self.token_emb(token_ids)
 
-        # Step 2: Create position indices [0, 1, 2, ..., seq_len-1]
-        positions = torch.arange(seq_len, device=token_ids.device)
+        # Step 2: Add position embeddings (only if NOT using RoPE)
+        # With RoPE, position is encoded via rotation in attention instead
+        if not self.use_rope:
+            positions = torch.arange(seq_len, device=token_ids.device)
+            pos_emb = self.pos_emb(positions)
+            embeddings = embeddings + pos_emb
 
-        # Step 3: Look up position embeddings
-        # [seq_len] -> [seq_len, n_embd]
-        pos_emb = self.pos_emb(positions)
-
-        # Step 4: Add them together!
-        # Broadcasting: [batch_size, seq_len, n_embd] + [seq_len, n_embd]
-        # Result: [batch_size, seq_len, n_embd]
-        embeddings = tok_emb + pos_emb
-
-        # Step 5: Apply dropout (if any)
+        # Step 3: Apply dropout (if any)
         embeddings = self.dropout(embeddings)
 
         return embeddings

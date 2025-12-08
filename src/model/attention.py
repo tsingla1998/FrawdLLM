@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import math
 
 from .config import ModelConfig
+from .rope import RotaryEmbedding
 
 
 class CausalSelfAttention(nn.Module):
@@ -34,6 +35,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.head_dim = config.n_embd // config.n_head  # e.g., 768/12 = 64
+        self.use_rope = config.use_rope
 
         # Linear projections to create Q, K, V
         # Each transforms [batch, seq, n_embd] -> [batch, seq, n_embd]
@@ -47,11 +49,19 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
+        # RoPE for position encoding (if enabled)
+        if self.use_rope:
+            self.rope = RotaryEmbedding(
+                dim=self.head_dim,
+                max_seq_len=config.context_length * 4,  # Allow extrapolation
+            )
+
         # Causal mask: lower triangular matrix
         # This prevents attending to future tokens
         # We register it as a buffer (saved with model, but not a parameter)
-        mask = torch.tril(torch.ones(config.context_length, config.context_length))
-        self.register_buffer("mask", mask.view(1, 1, config.context_length, config.context_length))
+        max_len = config.context_length * 4 if self.use_rope else config.context_length
+        mask = torch.tril(torch.ones(max_len, max_len))
+        self.register_buffer("mask", mask.view(1, 1, max_len, max_len))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -79,6 +89,13 @@ class CausalSelfAttention(nn.Module):
         q = q.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         k = k.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+
+        # Step 3.5: Apply RoPE (if enabled)
+        # This rotates Q and K based on position - encodes position info
+        if self.use_rope:
+            q = self.rope(q)
+            k = self.rope(k)
+            # Note: V is not rotated - only Q and K need position info
 
         # Step 4: Compute attention scores
         # Q @ K^T: [batch, n_head, seq, head_dim] @ [batch, n_head, head_dim, seq]

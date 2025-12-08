@@ -195,6 +195,79 @@ def train_bpe_tokenizer(
     return tokenizer
 
 
+def train_bpe_from_texts(
+    texts: list[str],
+    vocab_size: int = 32000,
+    min_frequency: int = 2,
+    output_path: Path | None = None,
+) -> Tokenizer:
+    """
+    Train a BPE tokenizer from a list of texts.
+
+    Args:
+        texts: List of text strings to train on
+        vocab_size: Target vocabulary size
+        min_frequency: Minimum frequency for a token
+        output_path: Where to save tokenizer.json (optional)
+
+    Returns:
+        Trained tokenizer
+    """
+    print(f"Training BPE tokenizer with vocab_size={vocab_size} on {len(texts):,} texts...")
+
+    # Initialize BPE tokenizer
+    tokenizer = Tokenizer(models.BPE())
+
+    # Pre-tokenize on whitespace and punctuation
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+
+    # Special tokens (including chat tokens for future SFT)
+    special_tokens = [
+        "<|pad|>",
+        "<|unk|>",
+        "<|bos|>",
+        "<|eos|>",
+        "<|user|>",
+        "<|assistant|>",
+    ]
+
+    # Trainer
+    trainer = trainers.BpeTrainer(
+        vocab_size=vocab_size,
+        min_frequency=min_frequency,
+        special_tokens=special_tokens,
+        show_progress=True,
+    )
+
+    # Train from iterator
+    tokenizer.train_from_iterator(texts, trainer=trainer)
+
+    # Post-processing for BOS/EOS
+    tokenizer.post_processor = TemplateProcessing(
+        single="<|bos|> $A <|eos|>",
+        special_tokens=[
+            ("<|bos|>", tokenizer.token_to_id("<|bos|>")),
+            ("<|eos|>", tokenizer.token_to_id("<|eos|>")),
+        ],
+    )
+
+    # Decoder
+    tokenizer.decoder = decoders.ByteLevel()
+
+    # Save if path provided
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        tokenizer.save(str(output_path))
+        print(f"Saved tokenizer to {output_path}")
+
+    print(f"Vocabulary size: {tokenizer.get_vocab_size()}")
+    print(f"  pad_id: {tokenizer.token_to_id('<|pad|>')}")
+    print(f"  bos_id: {tokenizer.token_to_id('<|bos|>')}")
+    print(f"  eos_id: {tokenizer.token_to_id('<|eos|>')}")
+
+    return tokenizer
+
+
 def load_tokenizer(tokenizer_path: Path | None = None) -> Tokenizer:
     """
     Load a trained tokenizer.

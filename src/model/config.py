@@ -157,6 +157,20 @@ FRAWDLLM_SMALL_LLAMA = ModelConfig(
     use_swiglu=True,
 )
 
+# ~100M parameters - Similar to GPT-2 Small but with modern architecture
+# Uses RoPE for position encoding, allowing longer context at inference
+FRAWDLLM_100M = ModelConfig(
+    vocab_size=32000,       # Larger vocab for diverse data
+    n_embd=768,
+    n_layer=12,
+    n_head=12,
+    context_length=1024,    # Train on 1024, can extrapolate to 2048+
+    dropout=0.1,
+    use_rope=True,          # Rotary position embeddings
+    use_rmsnorm=False,      # Keep LayerNorm for now
+    use_swiglu=False,       # Keep GELU for now
+)
+
 
 def get_config(name: str) -> ModelConfig:
     """Get a predefined configuration by name."""
@@ -166,6 +180,7 @@ def get_config(name: str) -> ModelConfig:
         "base": FRAWDLLM_BASE,
         "tiny-llama": FRAWDLLM_TINY_LLAMA,
         "small-llama": FRAWDLLM_SMALL_LLAMA,
+        "100m": FRAWDLLM_100M,
     }
 
     if name not in configs:
