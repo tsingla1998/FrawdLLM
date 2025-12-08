@@ -300,11 +300,24 @@ def train(
     return {"status": "done", "best_val_loss": trainer.best_val_loss}
 
 
+@app.function(image=image, timeout=12 * 3600)
+def run_pipeline(epochs: int = 1, batch_size: int = 32):
+    """Run data prep then training (can be detached)."""
+    print("Step 1: Preparing data...")
+    prep_result = prepare_data.remote()
+    print(f"Data prep: {prep_result}")
+
+    print("\nStep 2: Training...")
+    result = train.remote(epochs=epochs, batch_size=batch_size)
+    print(f"Training complete! Result: {result}")
+    return result
+
+
 @app.local_entrypoint()
 def main(
     epochs: int = 1,
     batch_size: int = 32,
 ):
-    """Run training on Modal."""
-    result = train.remote(epochs=epochs, batch_size=batch_size)
-    print(f"\nTraining complete! Result: {result}")
+    """Run full pipeline on Modal."""
+    result = run_pipeline.remote(epochs=epochs, batch_size=batch_size)
+    print(f"\nDone! Result: {result}")
