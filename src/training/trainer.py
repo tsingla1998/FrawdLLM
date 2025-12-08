@@ -54,6 +54,7 @@ class Trainer:
         use_wandb: bool = False,
         wandb_project: str = "frawdllm",
         use_amp: bool | None = None,
+        gradient_accumulation_steps: int = 1,
     ):
         """
         Args:
@@ -69,6 +70,7 @@ class Trainer:
             use_wandb: Whether to log to Weights & Biases
             wandb_project: W&B project name
             use_amp: Use automatic mixed precision (default: auto-detect CUDA)
+            gradient_accumulation_steps: Accumulate gradients over N steps
         """
         self.model = model
         self.train_loader = train_loader
@@ -76,6 +78,7 @@ class Trainer:
         self.config = config
         self.max_epochs = max_epochs
         self.grad_clip = grad_clip
+        self.gradient_accumulation_steps = gradient_accumulation_steps
 
         # Setup device (MPS for Mac, CUDA for Nvidia, else CPU)
         if torch.backends.mps.is_available():
@@ -169,23 +172,29 @@ class Trainer:
             # Forward pass with mixed precision
             with autocast(enabled=self.use_amp):
                 logits, loss = self.model(input_ids, targets)
+                # Scale loss for gradient accumulation
+                loss = loss / self.gradient_accumulation_steps
 
-            # Backward pass
-            self.optimizer.zero_grad()  # Clear old gradients
-            self.scaler.scale(loss).backward()  # Scaled backward for fp16
+            # Backward pass (accumulate gradients)
+            self.scaler.scale(loss).backward()
 
-            # Gradient clipping (prevents exploding gradients)
-            self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
-            # Update weights
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.scheduler.step()
-
-            # Track loss
-            total_loss += loss.item()
+            # Track loss (unscaled for logging)
+            total_loss += loss.item() * self.gradient_accumulation_steps
             num_batches += 1
+
+            # Only step optimizer every N batches
+            if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                # Gradient clipping (prevents exploding gradients)
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+                # Update weights
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.scheduler.step()
+
+                # Clear gradients for next accumulation
+                self.optimizer.zero_grad()
 
             # Update progress bar
             avg_loss = total_loss / num_batches
@@ -198,7 +207,7 @@ class Trainer:
             # Log to wandb
             if self.use_wandb and batch_idx % 10 == 0:
                 wandb.log({
-                    'train/loss': loss.item(),
+                    'train/loss': loss.item() * self.gradient_accumulation_steps,
                     'train/lr': current_lr,
                     'train/step': epoch * len(self.train_loader) + batch_idx,
                 })
