@@ -178,7 +178,7 @@ def prepare_data():
 @app.function(
     image=image,
     gpu="A100",
-    timeout=8 * 3600,  # 8 hours max for larger model
+    timeout=24 * 3600,  # 24 hours max
     volumes={DATA_DIR: volume},
 )
 def train(
@@ -300,7 +300,7 @@ def train(
     return {"status": "done", "best_val_loss": trainer.best_val_loss}
 
 
-@app.function(image=image, timeout=12 * 3600)
+@app.function(image=image, timeout=30 * 3600)  # 30 hours for full pipeline
 def run_pipeline(epochs: int = 1, batch_size: int = 32):
     """Run data prep then training (can be detached)."""
     print("Step 1: Preparing data...")
