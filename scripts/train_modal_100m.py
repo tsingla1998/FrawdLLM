@@ -2,14 +2,9 @@
 Train FrawdLLM 100M on Modal with OpenWebText.
 
 Usage:
-    # Prepare data locally first (recommended)
-    uv run python -m src.fetch_data.prepare_openwebtext
-
-    # Upload data to Modal volume
-    modal volume put frawdllm-data data/openwebtext /openwebtext
-
-    # Run training
     modal run scripts/train_modal_100m.py
+
+Data is prepared automatically on first run (downloads OpenWebText, trains tokenizer).
 """
 
 import modal
@@ -33,6 +28,113 @@ image = (
 volume = modal.Volume.from_name("frawdllm-data", create_if_missing=True)
 DATA_DIR = "/data"
 REPO_URL = "https://github.com/tsingla1998/FrawdLLM.git"
+
+
+def prepare_openwebtext_data(output_dir, sample_fraction=0.25, vocab_size=32000):
+    """Download and prepare OpenWebText data."""
+    from datasets import load_dataset
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+    from tokenizers.processors import TemplateProcessing
+    import numpy as np
+    from tqdm import tqdm
+    import json
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print(f"Preparing OpenWebText ({sample_fraction*100:.0f}% sample)")
+    print("=" * 60)
+
+    # Load dataset
+    print("\nLoading OpenWebText from HuggingFace...")
+    dataset = load_dataset("openwebtext", split="train", trust_remote_code=True)
+    total_docs = len(dataset)
+    print(f"Total documents: {total_docs:,}")
+
+    # Sample
+    sample_size = int(total_docs * sample_fraction)
+    print(f"\nSampling {sample_fraction*100:.0f}% = {sample_size:,} documents...")
+
+    dataset = dataset.shuffle(seed=42)
+    sampled = dataset.select(range(sample_size))
+
+    # Split train/val
+    val_fraction = 0.01
+    val_size = int(sample_size * val_fraction)
+    train_size = sample_size - val_size
+
+    train_data = sampled.select(range(train_size))
+    val_data = sampled.select(range(train_size, sample_size))
+
+    print(f"  Train: {train_size:,} documents")
+    print(f"  Val: {val_size:,} documents")
+
+    # Train tokenizer
+    print("\n" + "-" * 40)
+    tokenizer_sample_size = min(100000, train_size)
+    print(f"Training tokenizer on {tokenizer_sample_size:,} texts...")
+
+    tokenizer_texts = [train_data[i]["text"] for i in tqdm(range(tokenizer_sample_size))]
+
+    tokenizer = Tokenizer(models.BPE())
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+
+    special_tokens = ["<|pad|>", "<|unk|>", "<|bos|>", "<|eos|>", "<|user|>", "<|assistant|>"]
+
+    trainer = trainers.BpeTrainer(
+        vocab_size=vocab_size,
+        min_frequency=2,
+        special_tokens=special_tokens,
+        show_progress=True,
+    )
+
+    tokenizer.train_from_iterator(tokenizer_texts, trainer=trainer)
+
+    tokenizer.post_processor = TemplateProcessing(
+        single="<|bos|> $A <|eos|>",
+        special_tokens=[
+            ("<|bos|>", tokenizer.token_to_id("<|bos|>")),
+            ("<|eos|>", tokenizer.token_to_id("<|eos|>")),
+        ],
+    )
+    tokenizer.decoder = decoders.ByteLevel()
+
+    tokenizer.save(str(output_dir / "tokenizer.json"))
+    print(f"Vocabulary size: {tokenizer.get_vocab_size()}")
+
+    # Tokenize helper
+    def tokenize_split(data, path, desc):
+        bos_id = tokenizer.token_to_id("<|bos|>")
+        eos_id = tokenizer.token_to_id("<|eos|>")
+        all_tokens = []
+        for example in tqdm(data, desc=desc):
+            text = example["text"]
+            if not text.strip():
+                continue
+            encoded = tokenizer.encode(text)
+            all_tokens.extend([bos_id] + encoded.ids + [eos_id])
+        print(f"  {desc} tokens: {len(all_tokens):,}")
+        np.array(all_tokens, dtype=np.uint16).tofile(path)
+        return len(all_tokens)
+
+    # Tokenize
+    print("\n" + "-" * 40)
+    train_tokens = tokenize_split(train_data, output_dir / "train.bin", "Train")
+    val_tokens = tokenize_split(val_data, output_dir / "val.bin", "Val")
+
+    # Save metadata
+    meta = {
+        "vocab_size": vocab_size,
+        "train_tokens": train_tokens,
+        "val_tokens": val_tokens,
+        "train_docs": train_size,
+        "val_docs": val_size,
+        "sample_fraction": sample_fraction,
+    }
+    with open(output_dir / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+
+    print(f"\nDone! {train_tokens/1e9:.2f}B train tokens, {val_tokens/1e6:.1f}M val tokens")
 
 
 @app.function(
@@ -67,14 +169,13 @@ def train(
     os.chdir(repo_dir)
     sys.path.insert(0, repo_dir)
 
-    # Check for OpenWebText data
+    # Check for OpenWebText data - prepare if not found
     data_dir = Path(f"{DATA_DIR}/openwebtext")
     if not (data_dir / "train.bin").exists():
-        print("ERROR: OpenWebText data not found!")
-        print("Please prepare data locally and upload:")
-        print("  1. uv run python -m src.fetch_data.prepare_openwebtext")
-        print("  2. modal volume put frawdllm-data data/openwebtext /openwebtext")
-        return {"error": "Data not found"}
+        print("OpenWebText data not found, preparing...")
+        prepare_openwebtext_data(data_dir)
+        volume.commit()
+        print("Data preparation complete!")
 
     print(f"\n{'='*60}")
     print("Training FrawdLLM 100M on OpenWebText")
