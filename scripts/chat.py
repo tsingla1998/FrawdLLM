@@ -34,41 +34,47 @@ class LoadedModel:
     device: torch.device
 
 
-def find_checkpoints() -> dict[str, Path]:
-    """Find all available checkpoints."""
+def find_checkpoints() -> dict[str, tuple[Path, Path | None]]:
+    """Find all available checkpoints. Returns dict of name -> (checkpoint_path, tokenizer_path)."""
     checkpoints = {}
 
     # Check common locations
     base_dir = Path(__file__).parent.parent
 
-    # PT checkpoints
+    # 100M PT checkpoints (uses different tokenizer)
+    pt_100m = base_dir / "checkpoints_100m" / "best.pt"
+    tokenizer_100m = base_dir / "tokenizer_100m" / "tokenizer.json"
+    if pt_100m.exists():
+        checkpoints["PT-100M (best)"] = (pt_100m, tokenizer_100m if tokenizer_100m.exists() else None)
+
+    # PT checkpoints (TinyStories)
     pt_best = base_dir / "checkpoints" / "best.pt"
     if pt_best.exists():
-        checkpoints["PT (best)"] = pt_best
+        checkpoints["PT (best)"] = (pt_best, None)
 
     # SFT checkpoints
     sft_dir = base_dir / "checkpoints" / "sft"
     if sft_dir.exists():
         sft_best = sft_dir / "best.pt"
         if sft_best.exists():
-            checkpoints["SFT (best)"] = sft_best
+            checkpoints["SFT (best)"] = (sft_best, None)
 
         # Also check for epoch checkpoints
         for f in sorted(sft_dir.glob("checkpoint_epoch_*.pt")):
             epoch_num = f.stem.split("_")[-1]
-            checkpoints[f"SFT (epoch {epoch_num})"] = f
+            checkpoints[f"SFT (epoch {epoch_num})"] = (f, None)
 
     # DPO checkpoints (for future)
     dpo_dir = base_dir / "checkpoints" / "dpo"
     if dpo_dir.exists():
         dpo_best = dpo_dir / "best.pt"
         if dpo_best.exists():
-            checkpoints["DPO (best)"] = dpo_best
+            checkpoints["DPO (best)"] = (dpo_best, None)
 
     return checkpoints
 
 
-def load_model(checkpoint_path: Path, device: torch.device) -> LoadedModel:
+def load_model(checkpoint_path: Path, device: torch.device, tokenizer_path: Path | None = None) -> LoadedModel:
     """Load a model from checkpoint."""
     print(f"Loading {checkpoint_path}...")
 
@@ -80,11 +86,20 @@ def load_model(checkpoint_path: Path, device: torch.device) -> LoadedModel:
     model.to(device)
     model.eval()
 
-    # Load tokenizer
-    tokenizer = load_tokenizer()
+    # Load tokenizer (use custom path if provided, otherwise default)
+    if tokenizer_path is not None:
+        tokenizer = load_tokenizer(tokenizer_path)
+    else:
+        tokenizer = load_tokenizer()
 
     # Check if this is a chat model (has expanded vocab for chat tokens)
-    is_chat = config.vocab_size > 8192  # Our base vocab is 8192
+    # For 100M model, base vocab is 32000; for TinyStories it's 8192
+    base_vocab = config.vocab_size
+    is_chat = False  # PT models are not chat models
+
+    # If vocab is slightly larger than base, it might have chat tokens
+    if hasattr(config, '_original_vocab_size'):
+        is_chat = config.vocab_size > config._original_vocab_size
 
     if is_chat:
         tokenizer.add_special_tokens([USER_TOKEN, ASSISTANT_TOKEN])
@@ -159,17 +174,19 @@ class ChatApp:
         self.loaded_models: dict[str, LoadedModel] = {}
 
         print(f"\nFound {len(self.checkpoints)} checkpoints:")
-        for name, path in self.checkpoints.items():
-            print(f"  - {name}: {path}")
+        for name, (path, tokenizer_path) in self.checkpoints.items():
+            print(f"  - {name}: {path}" + (f" (tokenizer: {tokenizer_path})" if tokenizer_path else ""))
 
     def get_model(self, model_name: str) -> LoadedModel:
         """Get or load a model."""
         if model_name not in self.loaded_models:
             if model_name not in self.checkpoints:
                 raise ValueError(f"Unknown model: {model_name}")
+            checkpoint_path, tokenizer_path = self.checkpoints[model_name]
             self.loaded_models[model_name] = load_model(
-                self.checkpoints[model_name],
-                self.device
+                checkpoint_path,
+                self.device,
+                tokenizer_path
             )
         return self.loaded_models[model_name]
 
