@@ -89,39 +89,73 @@ def generate(num_examples: int = 15000):
                     existing.add(json.loads(line)["index"])
         print(f"Resuming: {len(existing)} already done")
 
-    # Generate
-    def gen_response(prompt):
-        formatted = f"<|bos|><|user|>{prompt}<|assistant|>"
-        input_ids = tokenizer.encode(formatted, add_special_tokens=False).ids
-        input_len = len(input_ids)
-        input_tensor = torch.tensor([input_ids], device=device)
+    # Batched generation
+    pad_id = tokenizer.token_to_id("<|pad|>")
+
+    def gen_batch(prompts_batch):
+        """Generate 2 responses for each prompt in batch."""
+        # Prepare inputs - each prompt appears twice
+        all_inputs = []
+        all_input_lens = []
+
+        for prompt in prompts_batch:
+            formatted = f"<|bos|><|user|>{prompt}<|assistant|>"
+            input_ids = tokenizer.encode(formatted, add_special_tokens=False).ids
+            all_inputs.extend([input_ids, input_ids])  # twice for 2 responses
+            all_input_lens.extend([len(input_ids), len(input_ids)])
+
+        # Pad to same length
+        max_len = max(len(x) for x in all_inputs)
+        padded = [x + [pad_id] * (max_len - len(x)) for x in all_inputs]
+        input_tensor = torch.tensor(padded, device=device)
 
         with torch.no_grad():
-            output = model.generate(input_tensor, max_new_tokens=200, temperature=0.9, top_k=50)
+            outputs = model.generate(input_tensor, max_new_tokens=200, temperature=0.9, top_k=50)
 
-        response = tokenizer.decode(output[0][input_len:].tolist())
-        return response.replace("<|eos|>", "").replace("<|pad|>", "").strip()
+        # Decode responses
+        results = []
+        for idx, (output, input_len) in enumerate(zip(outputs, all_input_lens)):
+            response = tokenizer.decode(output[input_len:].tolist())
+            response = response.replace("<|eos|>", "").replace("<|pad|>", "").strip()
+            results.append(response)
+
+        # Pair up responses (0,1), (2,3), (4,5), ...
+        pairs = []
+        for i in range(0, len(results), 2):
+            pairs.append((results[i], results[i+1]))
+        return pairs
 
     generated = 0
+    batch_size = 32  # Process 32 prompts at once (64 responses)
+
+    # Filter prompts not yet processed
+    prompts_to_process = [(i, p) for i, p in enumerate(prompts) if i not in existing]
+
     with open(output_file, "a") as f:
-        for i, prompt in enumerate(tqdm(prompts, desc="Generating")):
-            if i in existing:
+        for batch_start in tqdm(range(0, len(prompts_to_process), batch_size), desc="Generating"):
+            batch = prompts_to_process[batch_start:batch_start + batch_size]
+            batch_prompts = [p for _, p in batch]
+            batch_indices = [i for i, _ in batch]
+
+            try:
+                response_pairs = gen_batch(batch_prompts)
+
+                for (idx, prompt), (resp_a, resp_b) in zip(batch, response_pairs):
+                    if not resp_a.strip() or not resp_b.strip() or resp_a == resp_b:
+                        continue
+
+                    f.write(json.dumps({
+                        "index": idx,
+                        "prompt": prompt,
+                        "response_a": resp_a,
+                        "response_b": resp_b,
+                    }) + "\n")
+                    generated += 1
+
+                f.flush()
+            except Exception as e:
+                print(f"Batch error: {e}")
                 continue
-
-            resp_a = gen_response(prompt)
-            resp_b = gen_response(prompt)
-
-            if not resp_a.strip() or not resp_b.strip() or resp_a == resp_b:
-                continue
-
-            f.write(json.dumps({
-                "index": i,
-                "prompt": prompt,
-                "response_a": resp_a,
-                "response_b": resp_b,
-            }) + "\n")
-            f.flush()
-            generated += 1
 
             if generated % 500 == 0:
                 volume.commit()

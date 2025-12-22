@@ -1,0 +1,8 @@
+{
+  "vocab_size": 32000,
+  "train_tokens": 2262381314,
+  "val_tokens": 22599456,
+  "train_docs": 1983408,
+  "val_docs": 20034,
+  "sample_fraction": 0.25
+}
