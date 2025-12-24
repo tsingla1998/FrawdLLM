@@ -36,6 +36,8 @@ N_HEADS = 12
 HEAD_DIM = 64
 EMBEDDINGS_DIM = N_HEADS * HEAD_DIM
 ROPE_THETA = 10000.0
+TEMPERATURE = 0.5
+TOP_P = 0.9
 
 MAX_OUTPUT_TOKENS = 100
 
@@ -190,9 +192,21 @@ def main() -> None:
         for layer_num in range(12):
             x = process_layer(layer_num, x)
         x = process_final_layer(x)
-        logits = x[-1]
-        probs = logits.argmax()
-        next_token = probs.item()
+
+        # TEMPERATURE
+        logits = x[-1] / TEMPERATURE
+        probs = logits.softmax(dim=-1)
+        
+        # TOP-P 
+        sorted_probs, sorted_indicies = torch.sort(probs, descending=True)
+        cum_probs = torch.cumsum(sorted_probs, dim=0)
+
+        cum_probs_keep = cum_probs <= TOP_P
+        cum_probs_keep[0] = True # Always keep the first token since it could be higher than TOP_P and would get excluded by the logic above
+        
+        sorted_probs[~cum_probs_keep] = 0
+
+        next_token = sorted_indicies[torch.multinomial(sorted_probs, 1).item()]
         if next_token == STOP_TOKEN_ID:
             break
         tokens = torch.cat([tokens, torch.tensor([next_token])])
