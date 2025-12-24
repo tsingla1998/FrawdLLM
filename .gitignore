@@ -58,5 +58,5 @@ Thumbs.db
 .env
 .env.local
 
-data/hf_model/
+hf_model/
 data/
