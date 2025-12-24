@@ -1,5 +1,7 @@
+from typing import Optional
 from tokenizers import Tokenizer
 from functools import cache
+from dataclasses import dataclass
 
 import torch
 import math
@@ -33,13 +35,21 @@ STOP_TOKEN_ID = 3
 
 EPSILON = 1e-5
 N_HEADS = 12
+N_LAYERS = 12
 HEAD_DIM = 64
 EMBEDDINGS_DIM = N_HEADS * HEAD_DIM
 ROPE_THETA = 10000.0
 TEMPERATURE = 0.5
 TOP_P = 0.9
 
-MAX_OUTPUT_TOKENS = 100
+MAX_OUTPUT_TOKENS = 300
+
+@dataclass
+class KVCache:
+    k_cache: torch.Tensor
+    v_cache: torch.Tensor
+    seq_len: int
+    layer_num: int
 
 @cache
 def get_tokenizer() -> Tokenizer:
@@ -112,8 +122,14 @@ def apply_rope(x: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
 
     return out
 
-def process_attention(layer_num: int, x: torch.Tensor) -> torch.Tensor:
+def process_attention(layer_num: int, x: torch.Tensor, kv_cache: Optional[KVCache]) -> tuple[torch.Tensor, KVCache]:
     # Attention
+    if kv_cache:
+        x = x[-1:]
+        original_seq_len = kv_cache.seq_len + 1
+    else:
+        original_seq_len = x.shape[0]
+
     gamma = get_weights_tensor(LN1_WEIGHT_FORMAT_PRE_ATTN_KEY.format(layer_num))
     beta = get_weights_tensor(LN1_BIAS_FORMAT_PRE_ATTN_KEY.format(layer_num))
     mean = x.mean(dim=-1, keepdim=True)
@@ -126,18 +142,34 @@ def process_attention(layer_num: int, x: torch.Tensor) -> torch.Tensor:
     qkv_bias = get_weights_tensor(QKV_BIAS_KEY.format(layer_num))
     qkv += qkv_bias
     q, k, v = qkv.chunk(3, dim=-1)
-    q_batched = q.view(seq_len, N_HEADS, HEAD_DIM).transpose(0, 1)
-    k_batched = k.view(seq_len, N_HEADS, HEAD_DIM).transpose(0, 1)
-
+    q_batched = q.view(seq_len, N_HEADS, HEAD_DIM).transpose(0, 1)  # [N_HEADS, seq_len, HEAD_DIM]
+    k_batched = k.view(seq_len, N_HEADS, HEAD_DIM).transpose(0, 1)  # [N_HEADS, seq_len, HEAD_DIM]
+    v_batched = v.view(seq_len, N_HEADS, HEAD_DIM).transpose(0, 1)  # [N_HEADS, seq_len, HEAD_DIM]
+    
     # Apply RoPE to Q and K (not V)
-    angles = get_rope_freqs(seq_len)
+    if kv_cache:
+      angles = get_rope_freqs(original_seq_len)[-1:]
+    else:
+      angles = get_rope_freqs(original_seq_len)
+
     q_batched = apply_rope(q_batched, angles)
     k_batched = apply_rope(k_batched, angles)
+    
 
+    if kv_cache:
+        # Use kv cache.        [seq_len, N_HEADS, HEAD_DIM] + [seq_len, N_HEADS, HEAD_DIM] 
+        k_batched = torch.cat([kv_cache.k_cache, k_batched.transpose(0, 1)]).transpose(0, 1)  # [N_HEADS, seq_len, HEAD_DIM]
+        v_batched = torch.cat([kv_cache.v_cache, v_batched.transpose(0, 1)]).transpose(0, 1)  # [N_HEADS, seq_len, HEAD_DIM]
+
+                            #      [seq_len, N_HEADS, HEAD_DIM]
+    new_kv_cache = KVCache(k_cache=k_batched.transpose(0, 1), v_cache=v_batched.transpose(0, 1), seq_len=original_seq_len, layer_num=layer_num)
     res_batched = q_batched @ k_batched.transpose(-2, -1)
-    v_batched = v.view(seq_len, N_HEADS, HEAD_DIM).transpose(0, 1)
-    mask = torch.triu(torch.ones([seq_len, seq_len]), diagonal=1) * -1e9
-    res_batched += mask
+
+    # We only need this for og prompt, last token can attend to all previous tokens
+    if not kv_cache:
+        mask = torch.triu(torch.ones([original_seq_len, original_seq_len]), diagonal=1) * -1e9
+        res_batched += mask
+
     res_batched /= math.sqrt(HEAD_DIM)
     res_batched = res_batched.softmax(dim=-1)
     out = res_batched @ v_batched
@@ -145,7 +177,7 @@ def process_attention(layer_num: int, x: torch.Tensor) -> torch.Tensor:
     output_proj_weights = get_weights_tensor(OUTPUT_PROJ_WEIGHT_KEY.format(layer_num))
     output_proj_bias = get_weights_tensor(OUTPUT_PROJ_BIAS_KEY.format(layer_num))
     out = out @ output_proj_weights.T + output_proj_bias + x
-    return out
+    return out, new_kv_cache
 
 
 def process_mlp(layer_num: int, x: torch.Tensor) -> torch.Tensor:
@@ -164,10 +196,10 @@ def process_mlp(layer_num: int, x: torch.Tensor) -> torch.Tensor:
     output = output @ fc2_weights.T + fc2_bias
     return output + x
 
-def process_layer(layer_num: int, x: torch.Tensor) -> torch.Tensor:
-    o = process_attention(layer_num, x)
+def process_layer(layer_num: int, x: torch.Tensor, kv_cache: KVCache) -> tuple[torch.Tensor, KVCache]:
+    o, kv_cache = process_attention(layer_num, x, kv_cache)
     o = process_mlp(layer_num, o)
-    return o
+    return o, kv_cache
 
 def process_final_layer(x: torch.Tensor) -> torch.Tensor:
     gamma = get_weights_tensor(LNF_WEIGHT_FORMAT_KEY)
@@ -186,11 +218,13 @@ def main() -> None:
     prompt = format_prompt(prompt)
     tokens = get_tokens_for_prompt(prompt)
     output_tokens = []
+    kv_caches: list[Optional[KVCache]] = [None] * N_LAYERS
     for _ in range(MAX_OUTPUT_TOKENS):
         embeddings_for_prompt = get_embeddings_for_selection(tokens)
         x = embeddings_for_prompt
-        for layer_num in range(12):
-            x = process_layer(layer_num, x)
+        for layer_num in range(N_LAYERS):
+            x, kv_cache = process_layer(layer_num, x, kv_caches[layer_num])
+            kv_caches[layer_num] = kv_cache
         x = process_final_layer(x)
 
         # TEMPERATURE
